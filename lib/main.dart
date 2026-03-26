@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'object_detector.dart';
 
 List<CameraDescription> _cameras = [];
 
@@ -38,12 +40,24 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   CameraController? _controller;
   bool _permissionGranted = false;
   bool _initialized = false;
+  
+  final ObjectDetector _objectDetector = ObjectDetector();
+  final FlutterTts _flutterTts = FlutterTts();
+  String _currentCaption = "Analyzing environment...";
+  DateTime _lastCaptionTime = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _initTts();
+    _objectDetector.loadModel();
     _initCamera();
+  }
+
+  Future<void> _initTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSpeechRate(0.5);
   }
 
   Future<void> _initCamera() async {
@@ -76,6 +90,31 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       await _controller!.initialize();
       if (mounted) {
         setState(() => _initialized = true);
+        
+        _controller!.startImageStream((CameraImage image) async {
+          final now = DateTime.now();
+          if (now.difference(_lastCaptionTime).inSeconds >= 3) {
+            _lastCaptionTime = now;
+            
+            final detectedLabels = await _objectDetector.processImage(image);
+            if (detectedLabels.isNotEmpty) {
+              String newCaption;
+              if (detectedLabels.length == 1) {
+                newCaption = "There is a ${detectedLabels.first} in front of you.";
+              } else if (detectedLabels.length == 2) {
+                newCaption = "I see a ${detectedLabels[0]} and a ${detectedLabels[1]}.";
+              } else {
+                final last = detectedLabels.removeLast();
+                newCaption = "I see ${detectedLabels.join(', ')}, and a $last.";
+              }
+              
+              if (_currentCaption != newCaption && mounted) {
+                setState(() => _currentCaption = newCaption);
+                _flutterTts.speak(newCaption);
+              }
+            }
+          }
+        });
       }
     } catch (e) {
       debugPrint('Camera init error: $e');
@@ -171,13 +210,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
                 const SizedBox(height: 48),
 
-                // Static caption sentence
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 32),
+                // Dynamic caption sentence
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
                   child: Text(
-                    'A Man is Walking with a Dog.',
+                    _currentCaption,
                     textAlign: TextAlign.center,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w400,
                       color: Colors.black87,
