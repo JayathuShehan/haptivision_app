@@ -39,6 +39,8 @@ dependencies:
   tflite_flutter: any
   flutter_tts: any
   image: any
+  vibration: ^2.0.0
+  battery_plus: ^6.0.3
 
 dev_dependencies:
   flutter_test:
