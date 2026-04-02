@@ -98,8 +98,10 @@ void _inferenceIsolateMain(SendPort mainSendPort) {
         interpreter!.run(inputArray, outputArray);
 
         final indices = _processYoloOutput(outputArray[0]);
+        if (indices.isNotEmpty) dev.log('Detections: $indices');
         message.replyPort.send(_InferenceReply(message.id, indices));
-      } catch (e) {
+      } catch (e, st) {
+        dev.log('Inference Isolate run error: $e\n$st');
         message.replyPort.send(_InferenceReply(message.id, []));
       }
     }
@@ -264,7 +266,8 @@ Float32List? _convertCameraImageToFloat32(
       }
     }
     return float32list;
-  } catch (_) {
+  } catch (e, st) {
+    dev.log('Image conversion error: $e\n$st');
     return null;
   }
 }
@@ -274,7 +277,7 @@ List<int> _processYoloOutput(List<List<double>> output) {
   final numClasses = output.length - 4;
 
   final List<Map<String, dynamic>> boxes = [];
-  const double confThreshold = 0.5;
+  const double confThreshold = 0.25;
 
   for (int i = 0; i < numBoxes; i++) {
     double maxConf = 0;
@@ -336,14 +339,21 @@ image_lib.Image _convertYUV420ToImage(
   final uBytes = planes[1]['bytes'] as Uint8List;
   final vBytes = planes[2]['bytes'] as Uint8List;
 
-  final yRowStride = planes[0]['bytesPerRow'] as int;
-  final uvRowStride = planes[1]['bytesPerRow'] as int;
-  final uvPixelStride = planes[1]['bytesPerPixel'] as int;
+  final yRowStride = planes[0]['bytesPerRow'] as int? ?? width;
+  final uvRowStride = planes[1]['bytesPerRow'] as int? ?? (width ~/ 2);
+  final uvPixelStride = planes[1]['bytesPerPixel'] as int? ?? 2;
 
   for (int y = 0; y < height; y++) {
     for (int x = 0; x < width; x++) {
       final uvIndex = uvPixelStride * (x ~/ 2) + uvRowStride * (y ~/ 2);
       final index = y * yRowStride + x;
+      
+      if (index >= yBytes.length || uvIndex >= uBytes.length || uvIndex >= vBytes.length) {
+        // Break out safely if padded bytes don't align perfectly 
+        // with the reported dimensions on some devices
+        break;
+      }
+      
       final yp = yBytes[index];
       final up = uBytes[uvIndex];
       final vp = vBytes[uvIndex];

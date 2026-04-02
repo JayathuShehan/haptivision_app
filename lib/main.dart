@@ -304,22 +304,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             if (now.difference(_lastCaptionTime).inSeconds >= 3) {
               _lastCaptionTime = now;
 
-              if (result.labels.isNotEmpty) {
-                String newCaption;
-                final labels = result.labels;
-                if (labels.length == 1) {
-                  newCaption = 'There is a ${labels.first} in front of you.';
-                } else if (labels.length == 2) {
-                  newCaption = 'I see a ${labels[0]} and a ${labels[1]}.';
-                } else {
-                  final rest = labels.sublist(0, labels.length - 1);
-                  newCaption = 'I see ${rest.join(', ')}, and a ${labels.last}.';
-                }
+              final String newCaption = _buildCaption(result.labels);
 
-                if (_currentCaption != newCaption) {
-                  setState(() => _currentCaption = newCaption);
-                  _flutterTts.speak(newCaption);
-                }
+              if (_currentCaption != newCaption) {
+                setState(() => _currentCaption = newCaption);
+                _flutterTts.speak(newCaption);
               }
             }
           });
@@ -327,6 +316,91 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
     } catch (e) {
       debugPrint('Camera init error: $e');
+    }
+  }
+
+  /// Builds a natural-language scene description from detected object labels,
+  /// similar to BLIP captioning but using on-device YOLO detections.
+  String _buildCaption(List<String> labels) {
+    if (labels.isEmpty) return 'Clear ahead.';
+
+    // Group objects into semantic categories
+    const people = {'person'};
+    const vehicles = {'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train'};
+    const furniture = {'chair', 'couch', 'bed', 'dining table', 'bench'};
+    const electronics = {'laptop', 'tv', 'cell phone', 'keyboard', 'mouse', 'monitor'};
+    const dangers = {'traffic light', 'stop sign', 'fire hydrant'};
+
+    final labelSet = labels.toSet();
+    final hasPeople     = labelSet.intersection(people).isNotEmpty;
+    final hasVehicles   = labelSet.intersection(vehicles).isNotEmpty;
+    final hasFurniture  = labelSet.intersection(furniture).isNotEmpty;
+    final hasElectronics = labelSet.intersection(electronics).isNotEmpty;
+    final hasDangers    = labelSet.intersection(dangers).isNotEmpty;
+
+    final int personCount = labels.where(people.contains).length;
+    final vehicleTypes = labelSet.intersection(vehicles);
+    final furnitureTypes = labelSet.intersection(furniture);
+
+    // Build a contextual description
+    final parts = <String>[];
+
+    if (hasPeople) {
+      parts.add(personCount == 1 ? 'a person' : '$personCount people');
+    }
+    if (hasVehicles) {
+      final vList = vehicleTypes.toList();
+      if (vList.length == 1) {
+        parts.add('a ${vList.first}');
+      } else {
+        parts.add('${vList.sublist(0, vList.length - 1).join(', ')} and a ${vList.last}');
+      }
+    }
+    if (hasFurniture) {
+      final fList = furnitureTypes.toList();
+      parts.add(fList.length == 1 ? 'a ${fList.first}' : '${fList.join(' and ')}');
+    }
+    if (hasElectronics) {
+      parts.add('electronics');
+    }
+
+    // Other objects not in any named group
+    final uncategorised = labelSet
+        .difference(people)
+        .difference(vehicles)
+        .difference(furniture)
+        .difference(electronics)
+        .difference(dangers)
+        .toList();
+    for (final obj in uncategorised) {
+      parts.add('a $obj');
+    }
+
+    if (hasDangers) {
+      parts.add('a road hazard');
+    }
+
+    if (parts.isEmpty) return 'I see something ahead.';
+
+    // Build sentence
+    String subject;
+    if (parts.length == 1) {
+      subject = parts.first;
+    } else {
+      subject = '${parts.sublist(0, parts.length - 1).join(', ')} and ${parts.last}';
+    }
+
+    // Add context clue
+    if (hasPeople && hasFurniture && hasElectronics) {
+      return 'I see $subject in what looks like an office or workspace.';
+    } else if (hasPeople && hasVehicles) {
+      return 'Caution — I see $subject ahead.';
+    } else if (hasPeople && hasFurniture) {
+      return 'I see $subject in this space.';
+    } else if (hasVehicles && !hasPeople) {
+      return 'There is $subject nearby. Stay alert.';
+    } else {
+      return 'I see $subject.';
     }
   }
 
