@@ -1,13 +1,119 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:battery_plus/battery_plus.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as image_lib;
 import 'package:permission_handler/permission_handler.dart';
 
 import 'haptic_engine.dart';
 import 'object_detector.dart';
+
+// ═══════════════════════════════════════════════════════
+// BLIP CAPTION SERVICE
+// Sends a camera frame to the local BLIP Flask server and
+// returns the AI-generated caption string.
+//
+// Server must be running:  python blip_caption_server.py
+//
+// URL for Android emulator : http://10.0.2.2:5000
+// URL for physical device  : http://<PC-LAN-IP>:5000
+// ═══════════════════════════════════════════════════════
+
+const String kBlipServerUrl = 'http://10.0.2.2:5000';
+
+class BlipCaptionService {
+  /// Returns true when the BLIP server is reachable.
+  static Future<bool> isReachable() async {
+    try {
+      final resp = await http
+          .get(Uri.parse('$kBlipServerUrl/health'))
+          .timeout(const Duration(seconds: 2));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Encodes [cameraImage] as JPEG, sends it to the BLIP server,
+  /// and returns the generated caption.
+  /// Returns null on error or timeout.
+  static Future<String?> fetchCaption(CameraImage cameraImage) async {
+    try {
+      // Convert YUV420 / BGRA → RGB image → JPEG bytes
+      final jpegBytes = _cameraImageToJpeg(cameraImage);
+      if (jpegBytes == null) return null;
+
+      final b64 = base64Encode(jpegBytes);
+      final resp = await http
+          .post(
+            Uri.parse('$kBlipServerUrl/caption'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'image': b64}),
+          )
+          .timeout(const Duration(seconds: 8));
+
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        return (data['caption'] as String?)?.trim();
+      }
+    } catch (_) {
+      // Server unreachable or timed out — caller falls back to rule engine
+    }
+    return null;
+  }
+
+  /// Converts a CameraImage to JPEG bytes using the `image` package.
+  static Uint8List? _cameraImageToJpeg(CameraImage img) {
+    try {
+      image_lib.Image? decoded;
+      if (img.format.group == ImageFormatGroup.yuv420) {
+        decoded = _yuv420ToImage(img);
+      } else if (img.format.group == ImageFormatGroup.bgra8888) {
+        decoded = image_lib.Image.fromBytes(
+          width: img.width,
+          height: img.height,
+          bytes: img.planes[0].bytes.buffer,
+          order: image_lib.ChannelOrder.bgra,
+        );
+      }
+      if (decoded == null) return null;
+      // Downscale to 480×480 to keep the HTTP payload small
+      final resized = image_lib.copyResize(decoded, width: 480, height: 480);
+      return image_lib.encodeJpg(resized, quality: 75);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static image_lib.Image _yuv420ToImage(CameraImage img) {
+    final w = img.width, h = img.height;
+    final out = image_lib.Image(width: w, height: h);
+    final yBytes  = img.planes[0].bytes;
+    final uBytes  = img.planes[1].bytes;
+    final vBytes  = img.planes[2].bytes;
+    final yStride = img.planes[0].bytesPerRow;
+    final uvStride = img.planes[1].bytesPerRow;
+    final uvPixel  = img.planes[1].bytesPerPixel ?? 2;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final uvIdx = uvPixel * (x ~/ 2) + uvStride * (y ~/ 2);
+        final yIdx  = y * yStride + x;
+        if (yIdx >= yBytes.length || uvIdx >= uBytes.length || uvIdx >= vBytes.length) break;
+        final yp = yBytes[yIdx], up = uBytes[uvIdx], vp = vBytes[uvIdx];
+        final r = (yp + 1.402   * (vp - 128)).toInt();
+        final g = (yp - 0.344136 * (up - 128) - 0.714136 * (vp - 128)).toInt();
+        final b = (yp + 1.772   * (up - 128)).toInt();
+        out.setPixelRgb(x, y, r.clamp(0,255), g.clamp(0,255), b.clamp(0,255));
+      }
+    }
+    return out;
+  }
+}
 
 List<CameraDescription> _cameras = [];
 
@@ -137,7 +243,7 @@ class _HapticIndicatorState extends State<HapticIndicator>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _controller,
-      builder: (_, __) {
+      builder: (context, child) {
         final opacity = widget.pattern == null || widget.pattern == HapticPattern.clear
             ? 0.3
             : _controller.value;
@@ -153,7 +259,7 @@ class _HapticIndicatorState extends State<HapticIndicator>
                   shape: BoxShape.circle,
                   color: _colour,
                   boxShadow: widget.pattern != null && widget.pattern != HapticPattern.clear
-                      ? [BoxShadow(color: _colour.withOpacity(0.5), blurRadius: 14, spreadRadius: 2)]
+                      ? [BoxShadow(color: _colour.withValues(alpha: 0.5), blurRadius: 14, spreadRadius: 2)]
                       : null,
                 ),
               ),
@@ -196,6 +302,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   String _currentCaption = 'Analyzing environment...';
   DateTime _lastCaptionTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastSpokenCaption = '';
+
+  // BLIP server state
+  bool _blipAvailable = false;       // true once /health responds OK
+  bool _captionInFlight = false;     // prevents overlapping HTTP requests
 
   HapticPattern? _hapticPattern;
   bool _isBatteryLow = false;
@@ -210,6 +321,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _objectDetector.loadModel();
     _initCamera();
     _startBatteryMonitor();
+    _checkBlipServer(); // probe the BLIP server in the background
   }
 
   Future<void> _initHaptic() async {
@@ -224,7 +336,28 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   Future<void> _initTts() async {
     await _flutterTts.setLanguage('en-US');
-    await _flutterTts.setSpeechRate(0.5);
+    await _flutterTts.setSpeechRate(0.42);
+    await _flutterTts.awaitSpeakCompletion(true);
+  }
+
+  /// Poll the BLIP caption server once at startup, then every 15 s while
+  /// the app is running.  Updates [_blipAvailable] so the UI can show the
+  /// correct mode badge.
+  Future<void> _checkBlipServer() async {
+    final ok = await BlipCaptionService.isReachable();
+    if (mounted) setState(() => _blipAvailable = ok);
+    if (ok) { debugPrint('[BLIP] Server is reachable ✓'); }
+    else     { debugPrint('[BLIP] Server unreachable — using offline fallback'); }
+
+    // Keep re-checking every 15 s so it automatically reconnects
+    Timer.periodic(const Duration(seconds: 15), (t) async {
+      if (!mounted) { t.cancel(); return; }
+      final alive = await BlipCaptionService.isReachable();
+      if (alive != _blipAvailable && mounted) {
+        setState(() => _blipAvailable = alive);
+        debugPrint('[BLIP] Server ${alive ? "back online" : "went offline"}');
+      }
+    });
   }
 
   // check battery every 30 seconds
@@ -283,12 +416,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         setState(() => _initialized = true);
 
         _controller!.startImageStream((CameraImage image) {
-          // inference runs in the background isolate
+          // YOLO inference runs in the background isolate
           _objectDetector.processImage(image).then((result) {
             if (!mounted) return;
             final now = DateTime.now();
 
-            // trigger haptic pattern
+            // ── Haptic feedback (YOLO-driven, unchanged) ────────────────
             if (!_isBatteryLow) {
               _haptic.updateFromCategory(
                 category: result.category,
@@ -300,15 +433,27 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               }
             }
 
-            // update caption every 3 seconds
-            if (now.difference(_lastCaptionTime).inSeconds >= 3) {
+            // ── Captioning every 3 seconds ──────────────────────────────
+            if (now.difference(_lastCaptionTime).inSeconds >= 3 &&
+                !_captionInFlight) {
               _lastCaptionTime = now;
+              _captionInFlight = true;
 
-              final String newCaption = _buildCaption(result.labels);
-
-              if (_currentCaption != newCaption) {
-                setState(() => _currentCaption = newCaption);
-                _flutterTts.speak(newCaption);
+              if (_blipAvailable) {
+                // ── BLIP path: send frame to the Flask server ───────────
+                BlipCaptionService.fetchCaption(image).then((blipCaption) {
+                  _captionInFlight = false;
+                  if (!mounted) return;
+                  final caption = (blipCaption != null && blipCaption.isNotEmpty)
+                      ? blipCaption
+                      : _buildCaption(result.labels); // fallback
+                  _applyCaption(caption, result.labels);
+                });
+              } else {
+                // ── Offline fallback: rule-based captions ───────────────
+                _captionInFlight = false;
+                final caption = _buildCaption(result.labels);
+                _applyCaption(caption, result.labels);
               }
             }
           });
@@ -319,89 +464,88 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Builds a natural-language scene description from detected object labels,
-  /// similar to BLIP captioning but using on-device YOLO detections.
+  /// Apply a new caption: update display text + speak if changed.
+  void _applyCaption(String newCaption, List<String> labels) {
+    if (!mounted) return;
+    if (_currentCaption != newCaption) {
+      setState(() => _currentCaption = newCaption);
+    }
+    if (newCaption.isNotEmpty && _lastSpokenCaption != newCaption) {
+      _lastSpokenCaption = newCaption;
+      unawaited(_speakCaption(newCaption));
+    }
+  }
+
+  /// Offline fallback — lightweight rule-based caption from YOLO labels.
+  /// Used when the BLIP server is unreachable.
   String _buildCaption(List<String> labels) {
     if (labels.isEmpty) return 'Clear ahead.';
+    final detected = labels.toSet();
 
-    // Group objects into semantic categories
-    const people = {'person'};
-    const vehicles = {'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train'};
-    const furniture = {'chair', 'couch', 'bed', 'dining table', 'bench'};
-    const electronics = {'laptop', 'tv', 'cell phone', 'keyboard', 'mouse', 'monitor'};
-    const dangers = {'traffic light', 'stop sign', 'fire hydrant'};
+    const vehicles     = {'car','truck','bus','motorcycle','bicycle','train'};
+    const roadWarnings = {'traffic light','stop sign'};
+    const grooming     = {'toothbrush','hair drier'};
+    const tech         = {'cell phone','laptop','keyboard','mouse','remote','tv'};
+    const food         = {'bottle','cup','fork','knife','spoon','bowl',
+                          'banana','apple','sandwich','orange','broccoli',
+                          'carrot','hot dog','pizza','donut','cake'};
+    const furniture    = {'chair','couch','bed','dining table','toilet',
+                          'refrigerator','oven','microwave','sink','toaster'};
+    const sports       = {'bicycle','skateboard','surfboard','skis',
+                          'snowboard','tennis racket','baseball bat',
+                          'sports ball','frisbee','kite'};
+    const animals      = {'dog','cat','bird','horse','cow','sheep',
+                          'elephant','bear','zebra','giraffe'};
 
-    final labelSet = labels.toSet();
-    final hasPeople     = labelSet.intersection(people).isNotEmpty;
-    final hasVehicles   = labelSet.intersection(vehicles).isNotEmpty;
-    final hasFurniture  = labelSet.intersection(furniture).isNotEmpty;
-    final hasElectronics = labelSet.intersection(electronics).isNotEmpty;
-    final hasDangers    = labelSet.intersection(dangers).isNotEmpty;
+    final hasPerson = detected.contains('person');
 
-    final int personCount = labels.where(people.contains).length;
-    final vehicleTypes = labelSet.intersection(vehicles);
-    final furnitureTypes = labelSet.intersection(furniture);
+    // Vehicles — danger category, announce regardless of person
+    final veh = vehicles.firstWhere(detected.contains, orElse: () => '');
+    if (veh.isNotEmpty && !hasPerson) return '${_withArticle(veh)} ahead.';
+    if (veh.isNotEmpty && hasPerson)  return 'A person near a $veh.';
 
-    // Build a contextual description
-    final parts = <String>[];
+    final rw = roadWarnings.firstWhere(detected.contains, orElse: () => '');
+    if (rw.isNotEmpty) return 'Road warning ahead.';
 
-    if (hasPeople) {
-      parts.add(personCount == 1 ? 'a person' : '$personCount people');
-    }
-    if (hasVehicles) {
-      final vList = vehicleTypes.toList();
-      if (vList.length == 1) {
-        parts.add('a ${vList.first}');
-      } else {
-        parts.add('${vList.sublist(0, vList.length - 1).join(', ')} and a ${vList.last}');
+    if (hasPerson) {
+      final gr = grooming.firstWhere(detected.contains,  orElse: () => '');
+      if (gr.isNotEmpty) {
+        return gr == 'toothbrush'
+            ? 'A person brushing their teeth.' : 'A person using a hair dryer.';
       }
-    }
-    if (hasFurniture) {
-      final fList = furnitureTypes.toList();
-      parts.add(fList.length == 1 ? 'a ${fList.first}' : '${fList.join(' and ')}');
-    }
-    if (hasElectronics) {
-      parts.add('electronics');
+
+      final tc = tech.firstWhere(detected.contains,      orElse: () => '');
+      if (tc.isNotEmpty) return 'A person with a ${tc.replaceAll(" ", " ")}.';
+
+      final fd = food.firstWhere(detected.contains,      orElse: () => '');
+      if (fd.isNotEmpty) return 'A person eating or drinking.';
+
+      final sp = sports.firstWhere(detected.contains,    orElse: () => '');
+      if (sp.isNotEmpty) return 'A person playing sports.';
+
+      final an = animals.firstWhere(detected.contains,   orElse: () => '');
+      if (an.isNotEmpty) return 'A person with a $an.';
+
+      final fu = furniture.firstWhere(detected.contains, orElse: () => '');
+      if (fu.isNotEmpty) return 'A person near a $fu.';
+
+      return 'A person ahead.';
     }
 
-    // Other objects not in any named group
-    final uncategorised = labelSet
-        .difference(people)
-        .difference(vehicles)
-        .difference(furniture)
-        .difference(electronics)
-        .difference(dangers)
-        .toList();
-    for (final obj in uncategorised) {
-      parts.add('a $obj');
-    }
+    final ranked = detected.toList()..sort();
+    return '${_withArticle(ranked.first)} ahead.';
+  }
 
-    if (hasDangers) {
-      parts.add('a road hazard');
-    }
+  Future<void> _speakCaption(String caption) async {
+    await _flutterTts.stop();
+    await _flutterTts.speak(caption);
+  }
 
-    if (parts.isEmpty) return 'I see something ahead.';
-
-    // Build sentence
-    String subject;
-    if (parts.length == 1) {
-      subject = parts.first;
-    } else {
-      subject = '${parts.sublist(0, parts.length - 1).join(', ')} and ${parts.last}';
-    }
-
-    // Add context clue
-    if (hasPeople && hasFurniture && hasElectronics) {
-      return 'I see $subject in what looks like an office or workspace.';
-    } else if (hasPeople && hasVehicles) {
-      return 'Caution — I see $subject ahead.';
-    } else if (hasPeople && hasFurniture) {
-      return 'I see $subject in this space.';
-    } else if (hasVehicles && !hasPeople) {
-      return 'There is $subject nearby. Stay alert.';
-    } else {
-      return 'I see $subject.';
-    }
+  String _withArticle(String label) {
+    final lower = label.toLowerCase();
+    const vowels = {'a', 'e', 'i', 'o', 'u'};
+    final article = vowels.contains(lower[0]) ? 'an' : 'a';
+    return '$article $label';
   }
 
   HapticPattern? _patternFromCategory(HapticCategory category) {
@@ -433,6 +577,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _batteryTimer?.cancel();
     _haptic.stop();
+    _flutterTts.stop();
     _controller?.dispose();
     _objectDetector.dispose();
     super.dispose();
@@ -500,11 +645,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildLegend() {
-    const style = TextStyle(fontSize: 9, color: Color(0xFFCCCCCC));
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.55),
+        color: Colors.black.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(
@@ -530,7 +674,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       backgroundColor: Colors.white,
       body: Column(
         children: [
-          // logo and caption
+          // logo, mode badge, and caption
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -542,7 +686,50 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       color: Color(0xFF1A9FD6),
                       letterSpacing: 0.5,
                     )),
-                const SizedBox(height: 48),
+                const SizedBox(height: 6),
+                // BLIP / offline mode indicator
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: _blipAvailable
+                        ? const Color(0xFF1A9FD6).withValues(alpha: 0.12)
+                        : Colors.grey.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: _blipAvailable
+                          ? const Color(0xFF1A9FD6)
+                          : Colors.grey,
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 6, height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _blipAvailable
+                              ? const Color(0xFF1A9FD6)
+                              : Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _blipAvailable ? 'BLIP AI Captions' : 'Offline Captions',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: _blipAvailable
+                              ? const Color(0xFF1A9FD6)
+                              : Colors.grey,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 28),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 32),
                   child: Text(
@@ -557,6 +744,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ],
             ),
           ),
+
 
           // camera preview
           Expanded(
