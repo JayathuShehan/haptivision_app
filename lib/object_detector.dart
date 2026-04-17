@@ -17,7 +17,6 @@ class DetectionResult {
   static const empty = DetectionResult([], HapticCategory.clear);
 }
 
-// model bytes sent to the background isolate on init
 class _ModelBytesPayload {
   final Uint8List modelBytes;
   final List<String> labels;
@@ -25,7 +24,6 @@ class _ModelBytesPayload {
   _ModelBytesPayload(this.modelBytes, this.labels, this.replyPort);
 }
 
-// one camera frame sent for inference
 class _InferenceRequest {
   final int id;
   final List<Map<String, dynamic>> planes;
@@ -37,14 +35,12 @@ class _InferenceRequest {
       this.formatGroup, this.replyPort);
 }
 
-// result coming back from the isolate
 class _InferenceReply {
   final int id;
   final List<int> detectedIndices;
   _InferenceReply(this.id, this.detectedIndices);
 }
 
-// runs in background — keeps UI thread free
 void _inferenceIsolateMain(SendPort mainSendPort) {
   final receivePort = ReceivePort();
   mainSendPort.send(receivePort.sendPort);
@@ -116,10 +112,8 @@ class ObjectDetector {
   bool _isProcessing = false;
   int _nextId = 0;
 
-  // load model and spin up the background isolate
   Future<void> loadModel() async {
     try {
-      // rootBundle only works on the main isolate
       final modelData = await rootBundle.load('assets/models/best_int8.tflite');
       final modelBytes = modelData.buffer.asUint8List();
 
@@ -147,7 +141,6 @@ class ObjectDetector {
       });
       _isolateSendPort = await handshakeCompleter.future;
 
-      // send model data and wait for ready signal
       final initReplyPort = ReceivePort();
       final initCompleter = Completer<bool>();
       initReplyPort.listen((msg) {
@@ -169,7 +162,6 @@ class ObjectDetector {
     }
   }
 
-  // skips frame if still processing the previous one
   Future<DetectionResult> processImage(CameraImage? cameraImage) async {
     if (!_ready || cameraImage == null || _isProcessing) {
       return DetectionResult.empty;
@@ -349,8 +341,6 @@ image_lib.Image _convertYUV420ToImage(
       final index = y * yRowStride + x;
       
       if (index >= yBytes.length || uvIndex >= uBytes.length || uvIndex >= vBytes.length) {
-        // Break out safely if padded bytes don't align perfectly 
-        // with the reported dimensions on some devices
         break;
       }
       

@@ -13,21 +13,9 @@ import 'package:permission_handler/permission_handler.dart';
 import 'haptic_engine.dart';
 import 'object_detector.dart';
 
-// ═══════════════════════════════════════════════════════
-// BLIP CAPTION SERVICE
-// Sends a camera frame to the local BLIP Flask server and
-// returns the AI-generated caption string.
-//
-// Server must be running:  python blip_caption_server.py
-//
-// URL for Android emulator : http://10.0.2.2:5000
-// URL for physical device  : http://<PC-LAN-IP>:5000
-// ═══════════════════════════════════════════════════════
-
 const String kBlipServerUrl = 'http://10.0.2.2:5000';
 
 class BlipCaptionService {
-  /// Returns true when the BLIP server is reachable.
   static Future<bool> isReachable() async {
     try {
       final resp = await http
@@ -39,12 +27,8 @@ class BlipCaptionService {
     }
   }
 
-  /// Encodes [cameraImage] as JPEG, sends it to the BLIP server,
-  /// and returns the generated caption.
-  /// Returns null on error or timeout.
   static Future<String?> fetchCaption(CameraImage cameraImage) async {
     try {
-      // Convert YUV420 / BGRA → RGB image → JPEG bytes
       final jpegBytes = _cameraImageToJpeg(cameraImage);
       if (jpegBytes == null) return null;
 
@@ -62,12 +46,10 @@ class BlipCaptionService {
         return (data['caption'] as String?)?.trim();
       }
     } catch (_) {
-      // Server unreachable or timed out — caller falls back to rule engine
     }
     return null;
   }
 
-  /// Converts a CameraImage to JPEG bytes using the `image` package.
   static Uint8List? _cameraImageToJpeg(CameraImage img) {
     try {
       image_lib.Image? decoded;
@@ -82,7 +64,6 @@ class BlipCaptionService {
         );
       }
       if (decoded == null) return null;
-      // Downscale to 480×480 to keep the HTTP payload small
       final resized = image_lib.copyResize(decoded, width: 480, height: 480);
       return image_lib.encodeJpg(resized, quality: 75);
     } catch (_) {
@@ -140,8 +121,6 @@ class HaptiVisionApp extends StatelessWidget {
   }
 }
 
-// pulsing indicator in the top-right corner of the preview
-
 class HapticIndicator extends StatefulWidget {
   final HapticPattern? pattern;
   const HapticIndicator({super.key, required this.pattern});
@@ -177,27 +156,22 @@ class _HapticIndicatorState extends State<HapticIndicator>
     _controller.stop();
     switch (widget.pattern) {
       case HapticPattern.danger:
-        // fast blink for danger
         _controller.duration = const Duration(milliseconds: 80);
         _controller.forward();
         break;
       case HapticPattern.obstacle:
-        // medium blink for obstacle
         _controller.duration = const Duration(milliseconds: 300);
         _controller.forward();
         break;
       case HapticPattern.batteryLow:
-        // slow blink for low battery
         _controller.duration = const Duration(milliseconds: 800);
         _controller.forward();
         break;
       case HapticPattern.systemReady:
-        // startup blink
         _controller.duration = const Duration(milliseconds: 300);
         _controller.forward();
         break;
       default:
-        // no animation when clear
         _controller.value = 0.15;
         break;
     }
@@ -212,15 +186,15 @@ class _HapticIndicatorState extends State<HapticIndicator>
   Color get _colour {
     switch (widget.pattern) {
       case HapticPattern.danger:
-        return const Color(0xFFFF3232);     // bright red
+        return const Color(0xFFFF3232);
       case HapticPattern.obstacle:
-        return const Color(0xFFFF9532);     // orange
+        return const Color(0xFFFF9532);
       case HapticPattern.systemReady:
-        return const Color(0xFF32DC50);     // green
+        return const Color(0xFF32DC50);
       case HapticPattern.batteryLow:
-        return const Color(0xFFDCDC32);     // yellow
+        return const Color(0xFFDCDC32);
       default:
-        return const Color(0xFF606060);     // dim grey
+        return const Color(0xFF606060);
     }
   }
 
@@ -281,8 +255,6 @@ class _HapticIndicatorState extends State<HapticIndicator>
   }
 }
 
-// MAIN SCREEN
-
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -304,9 +276,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   DateTime _lastCaptionTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenCaption = '';
 
-  // BLIP server state
-  bool _blipAvailable = false;       // true once /health responds OK
-  bool _captionInFlight = false;     // prevents overlapping HTTP requests
+  bool _blipAvailable = false;
+  bool _captionInFlight = false;
 
   HapticPattern? _hapticPattern;
   bool _isBatteryLow = false;
@@ -321,14 +292,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _objectDetector.loadModel();
     _initCamera();
     _startBatteryMonitor();
-    _checkBlipServer(); // probe the BLIP server in the background
+    _checkBlipServer();
   }
 
   Future<void> _initHaptic() async {
     await _haptic.init();
     await _haptic.systemReady();
     if (mounted) setState(() => _hapticPattern = HapticPattern.systemReady);
-    // reset indicator after startup vibration
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _hapticPattern = null);
     });
@@ -340,16 +310,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     await _flutterTts.awaitSpeakCompletion(true);
   }
 
-  /// Poll the BLIP caption server once at startup, then every 15 s while
-  /// the app is running.  Updates [_blipAvailable] so the UI can show the
-  /// correct mode badge.
   Future<void> _checkBlipServer() async {
     final ok = await BlipCaptionService.isReachable();
     if (mounted) setState(() => _blipAvailable = ok);
     if (ok) { debugPrint('[BLIP] Server is reachable ✓'); }
     else     { debugPrint('[BLIP] Server unreachable — using offline fallback'); }
 
-    // Keep re-checking every 15 s so it automatically reconnects
     Timer.periodic(const Duration(seconds: 15), (t) async {
       if (!mounted) { t.cancel(); return; }
       final alive = await BlipCaptionService.isReachable();
@@ -360,9 +326,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     });
   }
 
-  // check battery every 30 seconds
   void _startBatteryMonitor() {
-    _checkBattery(); // immediate first check
+    _checkBattery();
     _batteryTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkBattery());
   }
 
@@ -379,12 +344,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           await _haptic.batteryLow();
           if (mounted) setState(() => _hapticPattern = HapticPattern.batteryLow);
         } else {
-          // recovered or charging, let detection take over
           await _haptic.stop();
         }
       }
     } catch (_) {
-      // not supported on this device
     }
   }
 
@@ -416,12 +379,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         setState(() => _initialized = true);
 
         _controller!.startImageStream((CameraImage image) {
-          // YOLO inference runs in the background isolate
           _objectDetector.processImage(image).then((result) {
             if (!mounted) return;
             final now = DateTime.now();
 
-            // ── Haptic feedback (YOLO-driven, unchanged) ────────────────
             if (!_isBatteryLow) {
               _haptic.updateFromCategory(
                 category: result.category,
@@ -433,24 +394,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               }
             }
 
-            // ── Captioning every 3 seconds ──────────────────────────────
             if (now.difference(_lastCaptionTime).inSeconds >= 3 &&
                 !_captionInFlight) {
               _lastCaptionTime = now;
               _captionInFlight = true;
 
               if (_blipAvailable) {
-                // ── BLIP path: send frame to the Flask server ───────────
                 BlipCaptionService.fetchCaption(image).then((blipCaption) {
                   _captionInFlight = false;
                   if (!mounted) return;
                   final caption = (blipCaption != null && blipCaption.isNotEmpty)
                       ? blipCaption
-                      : _buildCaption(result.labels); // fallback
+                      : _buildCaption(result.labels);
                   _applyCaption(caption, result.labels);
                 });
               } else {
-                // ── Offline fallback: rule-based captions ───────────────
                 _captionInFlight = false;
                 final caption = _buildCaption(result.labels);
                 _applyCaption(caption, result.labels);
@@ -464,7 +422,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Apply a new caption: update display text + speak if changed.
   void _applyCaption(String newCaption, List<String> labels) {
     if (!mounted) return;
     if (_currentCaption != newCaption) {
@@ -476,8 +433,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Offline fallback — lightweight rule-based caption from YOLO labels.
-  /// Used when the BLIP server is unreachable.
   String _buildCaption(List<String> labels) {
     if (labels.isEmpty) return 'Clear ahead.';
     final detected = labels.toSet();
@@ -499,7 +454,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
     final hasPerson = detected.contains('person');
 
-    // Vehicles — danger category, announce regardless of person
     final veh = vehicles.firstWhere(detected.contains, orElse: () => '');
     if (veh.isNotEmpty && !hasPerson) return '${_withArticle(veh)} ahead.';
     if (veh.isNotEmpty && hasPerson)  return 'A person near a $veh.';
@@ -583,8 +537,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // builds the camera preview widget
-
   Widget _buildCameraPreview() {
     if (!_permissionGranted) {
       return Center(
@@ -612,7 +564,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
     return Stack(
       children: [
-        // camera feed
         ClipRect(
           child: OverflowBox(
             alignment: Alignment.center,
@@ -627,14 +578,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ),
         ),
 
-        // haptic indicator
         Positioned(
           top: 12,
           right: 12,
           child: HapticIndicator(pattern: _hapticPattern),
         ),
 
-        // legend
         Positioned(
           bottom: 8,
           right: 8,
@@ -674,7 +623,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       backgroundColor: Colors.white,
       body: Column(
         children: [
-          // logo, mode badge, and caption
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -687,7 +635,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       letterSpacing: 0.5,
                     )),
                 const SizedBox(height: 6),
-                // BLIP / offline mode indicator
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                   decoration: BoxDecoration(
@@ -746,7 +693,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ),
 
 
-          // camera preview
           Expanded(
             child: Container(
               width: double.infinity,
@@ -759,8 +705,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 }
-
-// small coloured dot + label row used in the legend
 
 class _LegendRow extends StatelessWidget {
   final Color color;

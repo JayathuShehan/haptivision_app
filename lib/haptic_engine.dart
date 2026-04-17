@@ -1,8 +1,5 @@
 import 'package:vibration/vibration.dart';
 
-// vibration patterns for each alert state
-// priority: batteryLow > danger > obstacle > clear
-
 enum HapticPattern { danger, obstacle, clear, systemReady, batteryLow }
 
 class HapticEngine {
@@ -12,12 +9,10 @@ class HapticEngine {
   HapticPattern? _currentPattern;
   bool _hasVibrator = false;
 
-  // call once on startup
   Future<void> init() async {
     _hasVibrator = (await Vibration.hasVibrator()) ?? false;
   }
 
-  // 6 rapid pulses — high urgency
   Future<void> danger() async {
     if (!_hasVibrator || _currentPattern == HapticPattern.danger) return;
     _currentPattern = HapticPattern.danger;
@@ -31,7 +26,6 @@ class HapticEngine {
     Vibration.vibrate(pattern: pattern, repeat: 0);
   }
 
-  // two groups of 2 pulses with a gap
   Future<void> obstacle() async {
     if (!_hasVibrator || _currentPattern == HapticPattern.obstacle) return;
     _currentPattern = HapticPattern.obstacle;
@@ -46,14 +40,12 @@ class HapticEngine {
     Vibration.vibrate(pattern: pattern, repeat: 0);
   }
 
-  // silence = safe, just stop vibrating
   Future<void> clear() async {
     if (_currentPattern == HapticPattern.clear) return;
     _currentPattern = HapticPattern.clear;
     await Vibration.cancel();
   }
 
-  // 3 short pulses on startup, plays once
   Future<void> systemReady() async {
     if (!_hasVibrator) return;
     _currentPattern = HapticPattern.systemReady;
@@ -67,7 +59,6 @@ class HapticEngine {
     Vibration.vibrate(pattern: pattern, repeat: -1);
   }
 
-  // single pulse every 2 seconds
   Future<void> batteryLow() async {
     if (!_hasVibrator || _currentPattern == HapticPattern.batteryLow) return;
     _currentPattern = HapticPattern.batteryLow;
@@ -95,7 +86,6 @@ class HapticEngine {
     return pattern;
   }
 
-  // pick pattern based on what was detected
   Future<void> updateFromCategory({
     required HapticCategory category,
     required bool isBatteryLow,
@@ -118,7 +108,6 @@ class HapticEngine {
   }
 }
 
-// maps detected labels to a priority category
 enum HapticCategory { danger, obstacle, clear }
 
 const Set<String> kDangerClasses = {
