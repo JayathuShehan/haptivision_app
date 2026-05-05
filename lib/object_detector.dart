@@ -13,8 +13,11 @@ import 'haptic_engine.dart';
 class DetectionResult {
   final List<String> labels;
   final HapticCategory category;
-  const DetectionResult(this.labels, this.category);
-  static const empty = DetectionResult([], HapticCategory.clear);
+  // True when the detector was busy and inference was skipped entirely.
+  // Caption logic must ignore these to avoid overwriting real results.
+  final bool wasSkipped;
+  const DetectionResult(this.labels, this.category, {this.wasSkipped = false});
+  static const empty = DetectionResult([], HapticCategory.clear, wasSkipped: true);
 }
 
 class _ModelBytesPayload {

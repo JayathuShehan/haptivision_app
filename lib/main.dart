@@ -13,6 +13,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'haptic_engine.dart';
 import 'object_detector.dart';
 
+// Use 10.0.2.2 for Android emulator; for a physical device set this to
+// your PC's LAN IP (e.g. http://192.168.1.42:5000).
 const String kBlipServerUrl = 'http://10.0.2.2:5000';
 
 class BlipCaptionService {
@@ -381,6 +383,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         _controller!.startImageStream((CameraImage image) {
           _objectDetector.processImage(image).then((result) {
             if (!mounted) return;
+            // Skip frames where the detector was still processing a previous frame.
+            // Acting on these empty results causes the caption cooldown to fire
+            // with "Clear ahead." and then block the real inference result.
+            if (result.wasSkipped) return;
+
             final now = DateTime.now();
 
             if (!_isBatteryLow) {
@@ -564,9 +571,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
     return Stack(
       children: [
-        ClipRect(
-          child: OverflowBox(
-            alignment: Alignment.center,
+        Positioned.fill(
+          child: ClipRect(
             child: FittedBox(
               fit: BoxFit.cover,
               child: SizedBox(
