@@ -10,13 +10,22 @@ import 'package:image/image.dart' as image_lib;
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'haptic_engine.dart';
 
+class DetectedObject {
+  final String label;
+  final List<double> box; // [xmin, ymin, xmax, ymax] normalized 0..1 in 640×640 space
+  final double score;
+  const DetectedObject(this.label, this.box, this.score);
+}
+
 class DetectionResult {
   final List<String> labels;
   final HapticCategory category;
+  final List<DetectedObject> detections;
   // True when the detector was busy and inference was skipped entirely.
   // Caption logic must ignore these to avoid overwriting real results.
   final bool wasSkipped;
-  const DetectionResult(this.labels, this.category, {this.wasSkipped = false});
+  const DetectionResult(this.labels, this.category,
+      {this.wasSkipped = false, this.detections = const <DetectedObject>[]});
   static const empty = DetectionResult([], HapticCategory.clear, wasSkipped: true);
 }
 
@@ -38,10 +47,17 @@ class _InferenceRequest {
       this.formatGroup, this.replyPort);
 }
 
+class _DetectedBox {
+  final int classIdx;
+  final List<double> box; // [xmin, ymin, xmax, ymax] normalized 0..1
+  final double score;
+  _DetectedBox(this.classIdx, this.box, this.score);
+}
+
 class _InferenceReply {
   final int id;
-  final List<int> detectedIndices;
-  _InferenceReply(this.id, this.detectedIndices);
+  final List<_DetectedBox> detections;
+  _InferenceReply(this.id, this.detections);
 }
 
 void _inferenceIsolateMain(SendPort mainSendPort) {
@@ -65,7 +81,7 @@ void _inferenceIsolateMain(SendPort mainSendPort) {
 
     if (message is _InferenceRequest) {
       if (interpreter == null || labels == null) {
-        message.replyPort.send(_InferenceReply(message.id, []));
+        message.replyPort.send(_InferenceReply(message.id, <_DetectedBox>[]));
         return;
       }
       try {
@@ -76,7 +92,7 @@ void _inferenceIsolateMain(SendPort mainSendPort) {
           message.formatGroup,
         );
         if (inputList == null) {
-          message.replyPort.send(_InferenceReply(message.id, []));
+          message.replyPort.send(_InferenceReply(message.id, <_DetectedBox>[]));
           return;
         }
 
@@ -96,12 +112,14 @@ void _inferenceIsolateMain(SendPort mainSendPort) {
 
         interpreter!.run(inputArray, outputArray);
 
-        final indices = _processYoloOutput(outputArray[0]);
-        if (indices.isNotEmpty) dev.log('Detections: $indices');
-        message.replyPort.send(_InferenceReply(message.id, indices));
+        final detections = _processYoloOutput(outputArray[0]);
+        if (detections.isNotEmpty) {
+          dev.log('Detections: ${detections.map((d) => d.classIdx).toList()}');
+        }
+        message.replyPort.send(_InferenceReply(message.id, detections));
       } catch (e, st) {
         dev.log('Inference Isolate run error: $e\n$st');
-        message.replyPort.send(_InferenceReply(message.id, []));
+        message.replyPort.send(_InferenceReply(message.id, <_DetectedBox>[]));
       }
     }
   });
@@ -203,15 +221,18 @@ class ObjectDetector {
       final reply = await completer.future;
 
       final Set<String> detectedLabels = {};
-      for (var idx in reply.detectedIndices) {
-        if (idx >= 0 && idx < _labels!.length) {
-          detectedLabels.add(_labels![idx]);
+      final List<DetectedObject> detections = [];
+      for (final d in reply.detections) {
+        if (d.classIdx >= 0 && d.classIdx < _labels!.length) {
+          final label = _labels![d.classIdx];
+          detectedLabels.add(label);
+          detections.add(DetectedObject(label, d.box, d.score));
         }
       }
 
       _isProcessing = false;
       final labels = detectedLabels.toList();
-      return DetectionResult(labels, categoryFromLabels(labels));
+      return DetectionResult(labels, categoryFromLabels(labels), detections: detections);
     } catch (e) {
       _isProcessing = false;
       dev.log('ObjectDetector.processImage error: $e');
@@ -267,11 +288,11 @@ Float32List? _convertCameraImageToFloat32(
   }
 }
 
-List<int> _processYoloOutput(List<List<double>> output) {
+List<_DetectedBox> _processYoloOutput(List<List<double>> output) {
   final numBoxes = output[0].length;
   final numClasses = output.length - 4;
 
-  final List<Map<String, dynamic>> boxes = [];
+  final List<Map<String, dynamic>> candidates = [];
   const double confThreshold = 0.25;
 
   for (int i = 0; i < numBoxes; i++) {
@@ -287,7 +308,7 @@ List<int> _processYoloOutput(List<List<double>> output) {
     if (maxConf > confThreshold) {
       final xc = output[0][i], yc = output[1][i];
       final w = output[2][i], h = output[3][i];
-      boxes.add({
+      candidates.add({
         'box': [xc - w / 2, yc - h / 2, xc + w / 2, yc + h / 2],
         'score': maxConf,
         'class': maxClass,
@@ -295,23 +316,28 @@ List<int> _processYoloOutput(List<List<double>> output) {
     }
   }
 
-  boxes.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
+  candidates.sort((a, b) => (b['score'] as double).compareTo(a['score'] as double));
 
-  final List<int> result = [];
-  final List<Map<String, dynamic>> kept = [];
+  final List<_DetectedBox> result = [];
+  final List<List<double>> keptRaw = []; // raw 640-space boxes, parallel to result
 
-  for (final box in boxes) {
+  for (final c in candidates) {
+    final rawBox = c['box'] as List<double>;
+    final classIdx = c['class'] as int;
     bool keep = true;
-    for (final keptBox in kept) {
-      if (box['class'] == keptBox['class'] &&
-          _computeIou(box['box'], keptBox['box']) > 0.45) {
+    for (int ki = 0; ki < result.length; ki++) {
+      if (classIdx == result[ki].classIdx && _computeIou(rawBox, keptRaw[ki]) > 0.45) {
         keep = false;
         break;
       }
     }
     if (keep) {
-      kept.add(box);
-      result.add(box['class'] as int);
+      keptRaw.add(rawBox);
+      result.add(_DetectedBox(
+        classIdx,
+        rawBox.map((v) => v / 640.0).toList(),
+        c['score'] as double,
+      ));
     }
   }
   return result;

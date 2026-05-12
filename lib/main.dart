@@ -1,102 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:battery_plus/battery_plus.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:http/http.dart' as http;
-import 'package:image/image.dart' as image_lib;
 import 'package:permission_handler/permission_handler.dart';
 
+import 'blip_local.dart';
 import 'haptic_engine.dart';
 import 'object_detector.dart';
-
-// Use 10.0.2.2 for Android emulator; for a physical device set this to
-// your PC's LAN IP (e.g. http://192.168.1.42:5000).
-const String kBlipServerUrl = 'http://10.0.2.2:5000';
-
-class BlipCaptionService {
-  static Future<bool> isReachable() async {
-    try {
-      final resp = await http
-          .get(Uri.parse('$kBlipServerUrl/health'))
-          .timeout(const Duration(seconds: 2));
-      return resp.statusCode == 200;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static Future<String?> fetchCaption(CameraImage cameraImage) async {
-    try {
-      final jpegBytes = _cameraImageToJpeg(cameraImage);
-      if (jpegBytes == null) return null;
-
-      final b64 = base64Encode(jpegBytes);
-      final resp = await http
-          .post(
-            Uri.parse('$kBlipServerUrl/caption'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'image': b64}),
-          )
-          .timeout(const Duration(seconds: 8));
-
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
-        return (data['caption'] as String?)?.trim();
-      }
-    } catch (_) {
-    }
-    return null;
-  }
-
-  static Uint8List? _cameraImageToJpeg(CameraImage img) {
-    try {
-      image_lib.Image? decoded;
-      if (img.format.group == ImageFormatGroup.yuv420) {
-        decoded = _yuv420ToImage(img);
-      } else if (img.format.group == ImageFormatGroup.bgra8888) {
-        decoded = image_lib.Image.fromBytes(
-          width: img.width,
-          height: img.height,
-          bytes: img.planes[0].bytes.buffer,
-          order: image_lib.ChannelOrder.bgra,
-        );
-      }
-      if (decoded == null) return null;
-      final resized = image_lib.copyResize(decoded, width: 480, height: 480);
-      return image_lib.encodeJpg(resized, quality: 75);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static image_lib.Image _yuv420ToImage(CameraImage img) {
-    final w = img.width, h = img.height;
-    final out = image_lib.Image(width: w, height: h);
-    final yBytes  = img.planes[0].bytes;
-    final uBytes  = img.planes[1].bytes;
-    final vBytes  = img.planes[2].bytes;
-    final yStride = img.planes[0].bytesPerRow;
-    final uvStride = img.planes[1].bytesPerRow;
-    final uvPixel  = img.planes[1].bytesPerPixel ?? 2;
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        final uvIdx = uvPixel * (x ~/ 2) + uvStride * (y ~/ 2);
-        final yIdx  = y * yStride + x;
-        if (yIdx >= yBytes.length || uvIdx >= uBytes.length || uvIdx >= vBytes.length) break;
-        final yp = yBytes[yIdx], up = uBytes[uvIdx], vp = vBytes[uvIdx];
-        final r = (yp + 1.402   * (vp - 128)).toInt();
-        final g = (yp - 0.344136 * (up - 128) - 0.714136 * (vp - 128)).toInt();
-        final b = (yp + 1.772   * (up - 128)).toInt();
-        out.setPixelRgb(x, y, r.clamp(0,255), g.clamp(0,255), b.clamp(0,255));
-      }
-    }
-    return out;
-  }
-}
 
 List<CameraDescription> _cameras = [];
 
@@ -122,6 +34,10 @@ class HaptiVisionApp extends StatelessWidget {
     );
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// HAPTIC INDICATOR WIDGET
+// ═══════════════════════════════════════════════════════════════════
 
 class HapticIndicator extends StatefulWidget {
   final HapticPattern? pattern;
@@ -187,31 +103,21 @@ class _HapticIndicatorState extends State<HapticIndicator>
 
   Color get _colour {
     switch (widget.pattern) {
-      case HapticPattern.danger:
-        return const Color(0xFFFF3232);
-      case HapticPattern.obstacle:
-        return const Color(0xFFFF9532);
-      case HapticPattern.systemReady:
-        return const Color(0xFF32DC50);
-      case HapticPattern.batteryLow:
-        return const Color(0xFFDCDC32);
-      default:
-        return const Color(0xFF606060);
+      case HapticPattern.danger:      return const Color(0xFFFF3232);
+      case HapticPattern.obstacle:    return const Color(0xFFFF9532);
+      case HapticPattern.systemReady: return const Color(0xFF32DC50);
+      case HapticPattern.batteryLow:  return const Color(0xFFDCDC32);
+      default:                        return const Color(0xFF606060);
     }
   }
 
   String get _label {
     switch (widget.pattern) {
-      case HapticPattern.danger:
-        return 'DANGER';
-      case HapticPattern.obstacle:
-        return 'OBSTACLE';
-      case HapticPattern.systemReady:
-        return 'READY';
-      case HapticPattern.batteryLow:
-        return 'LOW BATT';
-      default:
-        return 'SAFE';
+      case HapticPattern.danger:      return 'DANGER';
+      case HapticPattern.obstacle:    return 'OBSTACLE';
+      case HapticPattern.systemReady: return 'READY';
+      case HapticPattern.batteryLow:  return 'LOW BATT';
+      default:                        return 'SAFE';
     }
   }
 
@@ -257,6 +163,10 @@ class _HapticIndicatorState extends State<HapticIndicator>
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// MAIN SCREEN
+// ═══════════════════════════════════════════════════════════════════
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -267,23 +177,24 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   CameraController? _controller;
   bool _permissionGranted = false;
-  bool _initialized = false;
+  bool _initialized       = false;
 
   final ObjectDetector _objectDetector = ObjectDetector();
-  final FlutterTts _flutterTts = FlutterTts();
-  final Battery _battery = Battery();
-  final HapticEngine _haptic = HapticEngine.instance;
+  final FlutterTts     _flutterTts     = FlutterTts();
+  final Battery        _battery        = Battery();
+  final HapticEngine   _haptic         = HapticEngine.instance;
+  final BlipLocalCaptionService _blip  = BlipLocalCaptionService.instance;
 
-  String _currentCaption = 'Analyzing environment...';
-  DateTime _lastCaptionTime = DateTime.fromMillisecondsSinceEpoch(0);
-  String _lastSpokenCaption = '';
+  String   _currentCaption    = 'Initializing AI...';
+  DateTime _lastCaptionTime   = DateTime.fromMillisecondsSinceEpoch(0);
+  String   _lastSpokenCaption = '';
+  bool     _captionInFlight   = false;
 
-  bool _blipAvailable = false;
-  bool _captionInFlight = false;
-
-  HapticPattern? _hapticPattern;
-  bool _isBatteryLow = false;
-  Timer? _batteryTimer;
+  HapticPattern?        _hapticPattern;
+  bool                  _isBatteryLow = false;
+  Timer?                _batteryTimer;
+  List<DetectedObject>  _detections = [];
+  int                   _sensorOrientation = 90;
 
   @override
   void initState() {
@@ -294,7 +205,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _objectDetector.loadModel();
     _initCamera();
     _startBatteryMonitor();
-    _checkBlipServer();
+    // Load BLIP models in background — takes ~10-20 s on first run
+    _blip.init().then((_) {
+      if (mounted) {
+        setState(() {
+          if (_currentCaption == 'Initializing AI...') {
+            _currentCaption = _blip.state == BlipState.ready
+                ? 'Analyzing environment...'
+                : 'AI unavailable — check model files.';
+          }
+        });
+      }
+    });
   }
 
   Future<void> _initHaptic() async {
@@ -312,22 +234,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     await _flutterTts.awaitSpeakCompletion(true);
   }
 
-  Future<void> _checkBlipServer() async {
-    final ok = await BlipCaptionService.isReachable();
-    if (mounted) setState(() => _blipAvailable = ok);
-    if (ok) { debugPrint('[BLIP] Server is reachable ✓'); }
-    else     { debugPrint('[BLIP] Server unreachable — using offline fallback'); }
-
-    Timer.periodic(const Duration(seconds: 15), (t) async {
-      if (!mounted) { t.cancel(); return; }
-      final alive = await BlipCaptionService.isReachable();
-      if (alive != _blipAvailable && mounted) {
-        setState(() => _blipAvailable = alive);
-        debugPrint('[BLIP] Server ${alive ? "back online" : "went offline"}');
-      }
-    });
-  }
-
   void _startBatteryMonitor() {
     _checkBattery();
     _batteryTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkBattery());
@@ -335,10 +241,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   Future<void> _checkBattery() async {
     try {
-      final level = await _battery.batteryLevel;
-      final state = await _battery.batteryState;
-      final isCharging = state == BatteryState.charging || state == BatteryState.full;
-      final nowLow = level < 20 && !isCharging;
+      final level     = await _battery.batteryLevel;
+      final state     = await _battery.batteryState;
+      final charging  = state == BatteryState.charging || state == BatteryState.full;
+      final nowLow    = level < 20 && !charging;
 
       if (nowLow != _isBatteryLow) {
         _isBatteryLow = nowLow;
@@ -349,8 +255,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           await _haptic.stop();
         }
       }
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 
   Future<void> _initCamera() async {
@@ -359,77 +264,74 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() => _permissionGranted = false);
       return;
     }
-
     setState(() => _permissionGranted = true);
-
     if (_cameras.isEmpty) return;
 
-    CameraDescription camera = _cameras.firstWhere(
+    final camera = _cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.back,
       orElse: () => _cameras.first,
     );
 
-    _controller = CameraController(
-      camera,
-      ResolutionPreset.high,
-      enableAudio: false,
-    );
+    _sensorOrientation = camera.sensorOrientation;
+    _controller = CameraController(camera, ResolutionPreset.high, enableAudio: false);
 
     try {
       await _controller!.initialize();
-      if (mounted) {
-        setState(() => _initialized = true);
+      if (!mounted) return;
+      setState(() => _initialized = true);
 
-        _controller!.startImageStream((CameraImage image) {
-          _objectDetector.processImage(image).then((result) {
-            if (!mounted) return;
-            // Skip frames where the detector was still processing a previous frame.
-            // Acting on these empty results causes the caption cooldown to fire
-            // with "Clear ahead." and then block the real inference result.
-            if (result.wasSkipped) return;
+      _controller!.startImageStream((CameraImage image) {
+        _objectDetector.processImage(image).then((result) {
+          if (!mounted) return;
+          // Skip frames where the detector was still busy with a previous frame.
+          // Acting on these empty results would set the caption to "Clear ahead."
+          // and lock out the real result via the 3-second cooldown.
+          if (result.wasSkipped) return;
 
-            final now = DateTime.now();
+          final now = DateTime.now();
 
-            if (!_isBatteryLow) {
-              _haptic.updateFromCategory(
-                category: result.category,
-                isBatteryLow: false,
-              );
-              final newPattern = _patternFromCategory(result.category);
-              if (newPattern != _hapticPattern) {
-                setState(() => _hapticPattern = newPattern);
-              }
-            }
+          if (!_isBatteryLow) {
+            _haptic.updateFromCategory(
+              category: result.category,
+              isBatteryLow: false,
+            );
+            final newPattern = _patternFromCategory(result.category);
+            setState(() {
+              _hapticPattern = newPattern;
+              _detections = result.detections;
+            });
+          } else {
+            setState(() => _detections = result.detections);
+          }
 
-            if (now.difference(_lastCaptionTime).inSeconds >= 3 &&
-                !_captionInFlight) {
-              _lastCaptionTime = now;
-              _captionInFlight = true;
+          if (now.difference(_lastCaptionTime).inSeconds >= 3 && !_captionInFlight) {
+            _lastCaptionTime  = now;
+            _captionInFlight  = true;
 
-              if (_blipAvailable) {
-                BlipCaptionService.fetchCaption(image).then((blipCaption) {
-                  _captionInFlight = false;
-                  if (!mounted) return;
-                  final caption = (blipCaption != null && blipCaption.isNotEmpty)
-                      ? blipCaption
-                      : _buildCaption(result.labels);
-                  _applyCaption(caption, result.labels);
-                });
-              } else {
+            if (_blip.state == BlipState.ready) {
+              // On-device BLIP — runs in background isolate
+              _blip.generateCaption(image).then((blipCaption) {
                 _captionInFlight = false;
-                final caption = _buildCaption(result.labels);
-                _applyCaption(caption, result.labels);
-              }
+                if (!mounted) return;
+                final caption = (blipCaption != null && blipCaption.isNotEmpty)
+                    ? blipCaption
+                    : _buildCaption(result.labels);
+                _applyCaption(caption);
+              });
+            } else {
+              // BLIP still loading or failed — use YOLO-derived caption
+              _captionInFlight = false;
+              _applyCaption(_buildCaption(result.labels));
             }
-          });
+          }
         });
-      }
+      });
     } catch (e) {
       debugPrint('Camera init error: $e');
     }
   }
 
-  void _applyCaption(String newCaption, List<String> labels) {
+  void _applyCaption(String newCaption) {
     if (!mounted) return;
     if (_currentCaption != newCaption) {
       setState(() => _currentCaption = newCaption);
@@ -469,22 +371,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (rw.isNotEmpty) return 'Road warning ahead.';
 
     if (hasPerson) {
-      final gr = grooming.firstWhere(detected.contains,  orElse: () => '');
+      final gr = grooming.firstWhere(detected.contains, orElse: () => '');
       if (gr.isNotEmpty) {
         return gr == 'toothbrush'
             ? 'A person brushing their teeth.' : 'A person using a hair dryer.';
       }
+      final tc = tech.firstWhere(detected.contains,     orElse: () => '');
+      if (tc.isNotEmpty) return 'A person with a $tc.';
 
-      final tc = tech.firstWhere(detected.contains,      orElse: () => '');
-      if (tc.isNotEmpty) return 'A person with a ${tc.replaceAll(" ", " ")}.';
-
-      final fd = food.firstWhere(detected.contains,      orElse: () => '');
+      final fd = food.firstWhere(detected.contains,     orElse: () => '');
       if (fd.isNotEmpty) return 'A person eating or drinking.';
 
-      final sp = sports.firstWhere(detected.contains,    orElse: () => '');
+      final sp = sports.firstWhere(detected.contains,   orElse: () => '');
       if (sp.isNotEmpty) return 'A person playing sports.';
 
-      final an = animals.firstWhere(detected.contains,   orElse: () => '');
+      final an = animals.firstWhere(detected.contains,  orElse: () => '');
       if (an.isNotEmpty) return 'A person with a $an.';
 
       final fu = furniture.firstWhere(detected.contains, orElse: () => '');
@@ -503,31 +404,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   String _withArticle(String label) {
-    final lower = label.toLowerCase();
     const vowels = {'a', 'e', 'i', 'o', 'u'};
-    final article = vowels.contains(lower[0]) ? 'an' : 'a';
-    return '$article $label';
+    return '${vowels.contains(label[0].toLowerCase()) ? "an" : "a"} $label';
   }
 
   HapticPattern? _patternFromCategory(HapticCategory category) {
     switch (category) {
-      case HapticCategory.danger:
-        return HapticPattern.danger;
-      case HapticCategory.obstacle:
-        return HapticPattern.obstacle;
-      case HapticCategory.clear:
-        return null;
+      case HapticCategory.danger:   return HapticPattern.danger;
+      case HapticCategory.obstacle: return HapticPattern.obstacle;
+      case HapticCategory.clear:    return null;
     }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
     if (state == AppLifecycleState.inactive) {
       _haptic.stop();
-      controller.dispose();
+      c.dispose();
     } else if (state == AppLifecycleState.resumed) {
       _initCamera();
     }
@@ -541,8 +436,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _flutterTts.stop();
     _controller?.dispose();
     _objectDetector.dispose();
+    _blip.dispose();
     super.dispose();
   }
+
+  // ── UI ──────────────────────────────────────────────────────────
 
   Widget _buildCameraPreview() {
     if (!_permissionGranted) {
@@ -566,7 +464,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
 
     if (!_initialized || _controller == null) {
-      return const Center(child: CircularProgressIndicator(color: Colors.white38));
+      return const Center(
+          child: CircularProgressIndicator(color: Colors.white38));
     }
 
     return Stack(
@@ -576,25 +475,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             child: FittedBox(
               fit: BoxFit.cover,
               child: SizedBox(
-                width: _controller!.value.previewSize!.height,
+                width:  _controller!.value.previewSize!.height,
                 height: _controller!.value.previewSize!.width,
-                child: CameraPreview(_controller!),
+                child:  CameraPreview(_controller!),
               ),
             ),
           ),
         ),
-
-        Positioned(
-          top: 12,
-          right: 12,
-          child: HapticIndicator(pattern: _hapticPattern),
+        Positioned.fill(
+          child: CustomPaint(
+            painter: _BoundingBoxPainter(_detections, _sensorOrientation),
+          ),
         ),
-
-        Positioned(
-          bottom: 8,
-          right: 8,
-          child: _buildLegend(),
-        ),
+        Positioned(top: 12, right: 12,
+            child: HapticIndicator(pattern: _hapticPattern)),
+        Positioned(bottom: 8, right: 8,
+            child: _buildLegend()),
       ],
     );
   }
@@ -606,18 +502,83 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         color: Colors.black.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Column(
+      child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
-        children: const [
+        children: [
           Text('[ Haptic Indicator ]',
-              style: TextStyle(fontSize: 9, color: Color(0xFFAAAAAA), fontWeight: FontWeight.bold)),
+              style: TextStyle(fontSize: 9, color: Color(0xFFAAAAAA),
+                  fontWeight: FontWeight.bold)),
           SizedBox(height: 3),
           _LegendRow(color: Color(0xFFFF3232), text: 'Fast blink  = DANGER'),
           _LegendRow(color: Color(0xFFFF9532), text: '2×2 blink  = OBSTACLE'),
           _LegendRow(color: Color(0xFF32DC50), text: '3× blink    = READY'),
           _LegendRow(color: Color(0xFFDCDC32), text: 'Slow blink  = BATTERY LOW'),
           _LegendRow(color: Color(0xFF606060), text: 'No blink    = SAFE'),
+        ],
+      ),
+    );
+  }
+
+  // Badge shown in the header — reflects BLIP loading state
+  Widget _buildAiBadge() {
+    final Color badgeColor;
+    final String badgeText;
+    final bool showSpinner;
+
+    switch (_blip.state) {
+      case BlipState.loading:
+        badgeColor  = Colors.orange;
+        badgeText   = 'Loading AI...';
+        showSpinner = true;
+        break;
+      case BlipState.ready:
+        badgeColor  = const Color(0xFF1A9FD6);
+        badgeText   = 'On-device AI';
+        showSpinner = false;
+        break;
+      case BlipState.failed:
+        badgeColor  = Colors.red;
+        badgeText   = 'AI load failed';
+        showSpinner = false;
+        break;
+      case BlipState.idle:
+        badgeColor  = Colors.grey;
+        badgeText   = 'AI offline';
+        showSpinner = false;
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      decoration: BoxDecoration(
+        color: badgeColor.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: badgeColor, width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showSpinner)
+            SizedBox(
+              width: 8, height: 8,
+              child: CircularProgressIndicator(
+                  strokeWidth: 1.5, color: badgeColor),
+            )
+          else
+            Container(
+              width: 6, height: 6,
+              decoration: BoxDecoration(
+                  shape: BoxShape.circle, color: badgeColor),
+            ),
+          const SizedBox(width: 5),
+          Text(badgeText,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: badgeColor,
+                letterSpacing: 0.3,
+              )),
         ],
       ),
     );
@@ -641,47 +602,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       letterSpacing: 0.5,
                     )),
                 const SizedBox(height: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: _blipAvailable
-                        ? const Color(0xFF1A9FD6).withValues(alpha: 0.12)
-                        : Colors.grey.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: _blipAvailable
-                          ? const Color(0xFF1A9FD6)
-                          : Colors.grey,
-                      width: 0.8,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 6, height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _blipAvailable
-                              ? const Color(0xFF1A9FD6)
-                              : Colors.grey,
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _blipAvailable ? 'BLIP AI Captions' : 'Offline Captions',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: _blipAvailable
-                              ? const Color(0xFF1A9FD6)
-                              : Colors.grey,
-                          letterSpacing: 0.3,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                _buildAiBadge(),
                 const SizedBox(height: 28),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -697,8 +618,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ],
             ),
           ),
-
-
           Expanded(
             child: Container(
               width: double.infinity,
@@ -713,7 +632,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 }
 
 class _LegendRow extends StatelessWidget {
-  final Color color;
+  final Color  color;
   final String text;
   const _LegendRow({required this.color, required this.text});
 
@@ -733,4 +652,105 @@ class _LegendRow extends StatelessWidget {
       ),
     );
   }
+}
+
+class _BoundingBoxPainter extends CustomPainter {
+  final List<DetectedObject> detections;
+  final int sensorOrientation;
+
+  const _BoundingBoxPainter(this.detections, this.sensorOrientation);
+
+  static const Color _danger   = Color(0xFFFF3232);
+  static const Color _obstacle = Color(0xFFFF9532);
+  static const Color _neutral  = Color(0xFF1A9FD6);
+
+  Color _colorFor(String label) {
+    if (kDangerClasses.contains(label))   return _danger;
+    if (kObstacleClasses.contains(label)) return _obstacle;
+    return _neutral;
+  }
+
+  // Map a normalized [0,1] landscape sensor point → portrait display [0,1].
+  // sensorOrientation = 90 means the sensor is rotated 90° CW from natural portrait,
+  // so we apply a 90° CW transform: (x,y) → (1-y, x).
+  Offset _rotatePt(double x, double y) {
+    switch (sensorOrientation) {
+      case 90:  return Offset(1 - y, x);
+      case 180: return Offset(1 - x, 1 - y);
+      case 270: return Offset(y, 1 - x);
+      default:  return Offset(x, y);
+    }
+  }
+
+  Rect _transformBox(List<double> box, Size size) {
+    final corners = [
+      _rotatePt(box[0], box[1]),
+      _rotatePt(box[2], box[1]),
+      _rotatePt(box[0], box[3]),
+      _rotatePt(box[2], box[3]),
+    ];
+    double minX = 1, minY = 1, maxX = 0, maxY = 0;
+    for (final c in corners) {
+      if (c.dx < minX) minX = c.dx;
+      if (c.dy < minY) minY = c.dy;
+      if (c.dx > maxX) maxX = c.dx;
+      if (c.dy > maxY) maxY = c.dy;
+    }
+    // Clamp to widget bounds
+    return Rect.fromLTRB(
+      (minX * size.width).clamp(0.0, size.width),
+      (minY * size.height).clamp(0.0, size.height),
+      (maxX * size.width).clamp(0.0, size.width),
+      (maxY * size.height).clamp(0.0, size.height),
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final det in detections) {
+      final color = _colorFor(det.label);
+      final rect  = _transformBox(det.box, size);
+      if (rect.isEmpty) continue;
+
+      // Semi-transparent fill so the box is always visible regardless of background
+      canvas.drawRect(rect, Paint()
+        ..color = color.withValues(alpha: 0.15)
+        ..style = PaintingStyle.fill);
+
+      // Border
+      canvas.drawRect(rect, Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.0);
+
+      // Label: sits at the top-left corner of the box.
+      // If the box starts at or near the top edge, the label goes inside; otherwise above.
+      final labelText = '${det.label} ${(det.score * 100).round()}%';
+      final tp = TextPainter(
+        text: TextSpan(
+          text: labelText,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: size.width);
+
+      const labelH = 20.0;
+      final labelW = tp.width + 10;
+      // Place label above the box when there is room, otherwise inside at top
+      final labelTop = rect.top >= labelH ? rect.top - labelH : rect.top;
+
+      canvas.drawRect(
+        Rect.fromLTWH(rect.left, labelTop, labelW, labelH),
+        Paint()..color = color,
+      );
+      tp.paint(canvas, Offset(rect.left + 5, labelTop + (labelH - tp.height) / 2));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BoundingBoxPainter old) => old.detections != detections;
 }

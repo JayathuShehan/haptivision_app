@@ -2,7 +2,7 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <application
-        android:label="haptivision_app"
+        android:label="HaptiVision"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

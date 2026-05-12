@@ -1,11 +1,11 @@
 {
-    "name": "haptivision_app",
-    "short_name": "haptivision_app",
+    "name": "HaptiVision",
+    "short_name": "HaptiVision",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "HaptiVision - AI-powered haptic vision assistant.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
